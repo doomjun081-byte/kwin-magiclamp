@@ -2,8 +2,8 @@
 
 #include "smoothlamp_algo_abi.h"
 
-#include <kwinoffscreeneffect.h>
-#include <kwinglutils.h>
+#include "effect/offscreeneffect.h"
+#include "effect/effectwindow.h"
 
 #include <QHash>
 #include <QRectF>
@@ -24,7 +24,10 @@ public:
 
     void reconfigure(ReconfigureFlags flags) override;
     void prePaintScreen(KWin::ScreenPrePaintData &data, std::chrono::milliseconds presentTime) override;
-    void prePaintWindow(KWin::EffectWindow *w, KWin::WindowPrePaintData &data, std::chrono::milliseconds presentTime) override;
+    void prePaintWindow(KWin::RenderView *view,
+                        KWin::EffectWindow *w,
+                        KWin::WindowPrePaintData &data,
+                        std::chrono::milliseconds presentTime) override;
     void postPaintScreen() override;
     bool isActive() const override;
     int requestedEffectChainPosition() const override { return 50; }
@@ -33,8 +36,8 @@ protected:
     void apply(KWin::EffectWindow *window, int mask, KWin::WindowPaintData &data, KWin::WindowQuadList &quads) override;
 
 private Q_SLOTS:
-    void slotWindowMinimized(KWin::EffectWindow *w);
-    void slotWindowUnminimized(KWin::EffectWindow *w);
+    void slotWindowAdded(KWin::EffectWindow *w);
+    void slotWindowMinimizedChanged(KWin::EffectWindow *w);
     void slotWindowDeleted(KWin::EffectWindow *w);
 
 private:
@@ -69,6 +72,9 @@ private:
         std::shared_ptr<KWin::EffectWindowVisibleRef> visibleRef;
         std::shared_ptr<LoadedAlgo> algo;
     };
+
+    void handleWindowMinimized(KWin::EffectWindow *w);
+    void handleWindowUnminimized(KWin::EffectWindow *w);
 
     std::shared_ptr<LoadedAlgo> loadAlgorithmLibrary(const QString &configPath);
     PanelEdge detectPanelEdge(KWin::EffectWindow *w, const QRectF &iconGeo) const;

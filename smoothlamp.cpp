@@ -1,14 +1,20 @@
 #include "smoothlamp.h"
 
+#include "effect/effecthandler.h"
+#include "effect/effectwindow.h"
+
 #include <dlfcn.h>
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QLoggingCategory>
 #include <QStandardPaths>
 
 #include <algorithm>
 #include <cmath>
+
+Q_LOGGING_CATEGORY(KWIN_SMOOTHLAMP, "kwin_effect_smoothlamp", QtWarningMsg)
 
 namespace {
 
@@ -45,16 +51,23 @@ SmoothLampEffect::SmoothLampEffect()
 
     reconfigure(ReconfigureAll);
 
-    connect(KWin::effects, &KWin::EffectsHandler::windowMinimized,
-            this, &SmoothLampEffect::slotWindowMinimized);
-    connect(KWin::effects, &KWin::EffectsHandler::windowUnminimized,
-            this, &SmoothLampEffect::slotWindowUnminimized);
+    connect(KWin::effects, &KWin::EffectsHandler::windowAdded,
+            this, &SmoothLampEffect::slotWindowAdded);
     connect(KWin::effects, &KWin::EffectsHandler::windowDeleted,
             this, &SmoothLampEffect::slotWindowDeleted);
+
+    const auto existingWindows = KWin::effects->stackingOrder();
+    for (KWin::EffectWindow *w : existingWindows) {
+        slotWindowAdded(w);
+    }
 }
 
 SmoothLampEffect::~SmoothLampEffect()
 {
+    const auto activeWindows = m_animations.keys();
+    for (KWin::EffectWindow *w : activeWindows) {
+        unredirect(w);
+    }
     m_animations.clear();
     m_algo.reset();
 }
@@ -66,10 +79,25 @@ bool SmoothLampEffect::supported()
 
 std::shared_ptr<SmoothLampEffect::LoadedAlgo> SmoothLampEffect::loadAlgorithmLibrary(const QString &configPath)
 {
-    const QString userSo = QDir::homePath() + QStringLiteral("/.local/lib/smoothlamp_algo.so");
-    const QString sysSo = QStringLiteral("/usr/lib/smoothlamp_algo.so");
-    const QString srcSo = QFile::exists(userSo) ? userSo : (QFile::exists(sysSo) ? sysSo : QString());
+    QStringList candidates = {
+        QDir::homePath() + QStringLiteral("/.local/lib/smoothlamp_algo.so"),
+#ifdef SMOOTHLAMP_SYS_SO_PATH
+        QStringLiteral(SMOOTHLAMP_SYS_SO_PATH),
+#endif
+        QStringLiteral("/usr/lib/x86_64-linux-gnu/smoothlamp_algo.so"),
+        QStringLiteral("/usr/lib/smoothlamp_algo.so"),
+        QStringLiteral("/usr/local/lib/smoothlamp_algo.so"),
+    };
+
+    QString srcSo;
+    for (const QString &path : candidates) {
+        if (QFile::exists(path)) {
+            srcSo = path;
+            break;
+        }
+    }
     if (srcSo.isEmpty()) {
+        qCWarning(KWIN_SMOOTHLAMP) << "Could not find smoothlamp_algo.so in:" << candidates;
         return nullptr;
     }
 
@@ -86,11 +114,13 @@ std::shared_ptr<SmoothLampEffect::LoadedAlgo> SmoothLampEffect::loadAlgorithmLib
 
     QFile::remove(tempPath);
     if (!QFile::copy(srcSo, tempPath)) {
+        qCWarning(KWIN_SMOOTHLAMP) << "Failed to copy algorithm library from" << srcSo << "to" << tempPath;
         return nullptr;
     }
 
     void *handle = dlopen(QFile::encodeName(tempPath).constData(), RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
+        qCWarning(KWIN_SMOOTHLAMP) << "dlopen failed:" << dlerror();
         QFile::remove(tempPath);
         return nullptr;
     }
@@ -104,9 +134,12 @@ std::shared_ptr<SmoothLampEffect::LoadedAlgo> SmoothLampEffect::loadAlgorithmLib
     auto prepareFrameFn = reinterpret_cast<SmoothLampPrepareFrameFn>(dlsym(handle, "smoothlamp_algo_prepare_frame"));
     auto deformFn = reinterpret_cast<SmoothLampDeformFn>(dlsym(handle, "smoothlamp_algo_deform"));
 
-    if (!abiFn || abiFn() != SMOOTHLAMP_ALGO_ABI_VERSION
+    const int abi = abiFn ? abiFn() : -1;
+    if (abi != SMOOTHLAMP_ALGO_ABI_VERSION
         || !createFn || !destroyFn || !getParamsFn
         || !calcDurationFn || !remapProgressFn || !prepareFrameFn || !deformFn) {
+        qCWarning(KWIN_SMOOTHLAMP) << "Invalid ABI or missing symbols in" << srcSo
+                                   << "got ABI" << abi << "expected" << SMOOTHLAMP_ALGO_ABI_VERSION;
         dlclose(handle);
         QFile::remove(tempPath);
         return nullptr;
@@ -145,11 +178,40 @@ void SmoothLampEffect::reconfigure(ReconfigureFlags)
     }
 }
 
+void SmoothLampEffect::slotWindowAdded(KWin::EffectWindow *w)
+{
+    if (!w) {
+        return;
+    }
+    connect(w, &KWin::EffectWindow::minimizedChanged,
+            this, &SmoothLampEffect::slotWindowMinimizedChanged,
+            Qt::UniqueConnection);
+}
+
+void SmoothLampEffect::slotWindowMinimizedChanged(KWin::EffectWindow *w)
+{
+    if (!w) {
+        return;
+    }
+    if (w->isMinimized()) {
+        handleWindowMinimized(w);
+    } else {
+        handleWindowUnminimized(w);
+    }
+}
+
 SmoothLampEffect::PanelEdge SmoothLampEffect::detectPanelEdge(KWin::EffectWindow *w, const QRectF &iconGeo) const
 {
-    const QRectF screen = KWin::effects->clientArea(KWin::ScreenArea, w);
-    const QPointF ic = iconGeo.center();
+    const QPoint iconCenter = iconGeo.center().toPoint();
+    const KWin::LogicalOutput *iconScreen = KWin::effects->screenAt(iconCenter);
+    const auto desktops = w->desktops();
+    const KWin::VirtualDesktop *desktop = desktops.isEmpty() ? nullptr : desktops.constFirst();
 
+    const QRectF screen = iconScreen
+        ? KWin::effects->clientArea(KWin::ScreenArea, iconScreen, desktop)
+        : KWin::effects->clientArea(KWin::ScreenArea, w);
+
+    const QPointF ic = iconGeo.center();
     const double dBottom = std::abs(screen.bottom() - ic.y());
     const double dTop = std::abs(ic.y() - screen.top());
     const double dLeft = std::abs(ic.x() - screen.left());
@@ -193,10 +255,10 @@ double SmoothLampEffect::windowDurationMs(const std::shared_ptr<LoadedAlgo> &alg
     if (algo->params.ignore_global_speed) {
         return rawMs;
     }
-    return std::max(1.0, double(animationTime(std::max(1, int(std::lround(rawMs))))));
+    return std::max(1.0, animationTime(std::chrono::milliseconds(std::max(1, int(std::lround(rawMs))))));
 }
 
-void SmoothLampEffect::slotWindowMinimized(KWin::EffectWindow *w)
+void SmoothLampEffect::handleWindowMinimized(KWin::EffectWindow *w)
 {
     if (!m_algo || KWin::effects->hasActiveFullScreenEffect()) {
         return;
@@ -237,7 +299,7 @@ void SmoothLampEffect::slotWindowMinimized(KWin::EffectWindow *w)
     KWin::effects->addRepaintFull();
 }
 
-void SmoothLampEffect::slotWindowUnminimized(KWin::EffectWindow *w)
+void SmoothLampEffect::handleWindowUnminimized(KWin::EffectWindow *w)
 {
     if (!m_algo || KWin::effects->hasActiveFullScreenEffect()) {
         return;
@@ -291,7 +353,9 @@ void SmoothLampEffect::prePaintScreen(KWin::ScreenPrePaintData &data, std::chron
     if (m_lastPresentTime != std::chrono::milliseconds::zero()) {
         deltaMs = std::clamp(double((presentTime - m_lastPresentTime).count()), 0.0, 50.0);
     }
-    m_lastPresentTime = presentTime;
+    if (presentTime > m_lastPresentTime) {
+        m_lastPresentTime = presentTime;
+    }
 
     for (auto it = m_animations.begin(); it != m_animations.end(); ++it) {
         const double turnaround = it->algo ? it->algo->params.turnaround_ms : 55.0;
@@ -323,13 +387,16 @@ void SmoothLampEffect::prePaintScreen(KWin::ScreenPrePaintData &data, std::chron
     KWin::effects->prePaintScreen(data, presentTime);
 }
 
-void SmoothLampEffect::prePaintWindow(KWin::EffectWindow *w, KWin::WindowPrePaintData &data, std::chrono::milliseconds presentTime)
+void SmoothLampEffect::prePaintWindow(KWin::RenderView *view,
+                                      KWin::EffectWindow *w,
+                                      KWin::WindowPrePaintData &data,
+                                      std::chrono::milliseconds presentTime)
 {
     if (m_animations.contains(w)) {
         data.setTransformed();
     }
 
-    KWin::effects->prePaintWindow(w, data, presentTime);
+    KWin::effects->prePaintWindow(view, w, data, presentTime);
 }
 
 void SmoothLampEffect::postPaintScreen()

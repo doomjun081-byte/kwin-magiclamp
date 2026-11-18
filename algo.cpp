@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <fstream>
 #include <string>
@@ -41,6 +42,32 @@ std::string trim(const std::string &s)
         --b;
     }
     return s.substr(a, b - a);
+}
+
+bool parseDouble(const std::string &s, double &out)
+{
+    double v = 0.0;
+    const char *begin = s.data();
+    const char *end = begin + s.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, v);
+    if (ec == std::errc() && ptr == end && std::isfinite(v)) {
+        out = v;
+        return true;
+    }
+    return false;
+}
+
+bool parseInt(const std::string &s, int &out)
+{
+    int v = 0;
+    const char *begin = s.data();
+    const char *end = begin + s.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, v);
+    if (ec == std::errc() && ptr == end) {
+        out = v;
+        return true;
+    }
+    return false;
 }
 
 struct AlgoContext {
@@ -140,7 +167,7 @@ FrameGeom computeFrameGeom(const AlgoContext &cfg, const SmoothLampFrameInfo &in
     g.iconCenterU = 0.5 * (iconU0 + iconU1);
     const double iconCross = std::max(4.0, std::abs(iconU1 - iconU0));
 
-    const double maxNeckHalf = std::min(14.0, std::max(cfg.minNeckHalfPx, iconCross * 0.30));
+    const double maxNeckHalf = std::max(cfg.minNeckHalfPx, std::min(14.0, iconCross * 0.30));
     const double baseNeckHalf = std::clamp(winCross * cfg.normTipHalfW, cfg.minNeckHalfPx, maxNeckHalf);
     const double tuck = glslSmoothStep(cfg.tuckStart, 1.0, g.c);
     g.effectiveNeckHalf = lerp(baseNeckHalf, std::max(1.8, cfg.minNeckHalfPx * 0.85), tuck);
@@ -196,37 +223,36 @@ void loadIni(AlgoContext &ctx, const char *path)
         const std::string key = trim(line.substr(0, eq));
         const std::string val = trim(line.substr(eq + 1));
 
-        try {
-            if (section == "Basic") {
-                if (key == "refDurationMs") ctx.refDurationMs = std::clamp(std::stod(val), 50.0, 3000.0);
-                else if (key == "unminimizeSpeedScale") ctx.unminimizeSpeedScale = std::clamp(std::stod(val), 0.2, 3.0);
-                else if (key == "turnaroundMs") ctx.host.turnaround_ms = std::stod(val);
-                else if (key == "ignoreGlobalSpeed") ctx.host.ignore_global_speed = (val == "true" || val == "1") ? 1 : 0;
-                else if (key == "sizeScaleExponent") ctx.sizeScaleExponent = std::clamp(std::stod(val), 0.0, 1.0);
-                else if (key == "minDurationScale") ctx.minDurationScale = std::clamp(std::stod(val), 0.4, 1.0);
-                else if (key == "maxDurationScale") ctx.maxDurationScale = std::clamp(std::stod(val), 1.0, 2.5);
-                else if (key == "pourMode") ctx.pourMode = (val == "true" || val == "1");
-                else if (key == "pourMix") ctx.pourMix = std::clamp(std::stod(val), 0.0, 1.0);
-            } else if (section == "QML_Standard") {
-                if (key == "refWinW") ctx.refWinW = std::clamp(std::stod(val), 200.0, 3840.0);
-                else if (key == "refWinH") ctx.refWinH = std::clamp(std::stod(val), 200.0, 2160.0);
-                else if (key == "normSquashEnd") ctx.normSquashEnd = std::clamp(std::stod(val), 0.10, 0.80);
-                else if (key == "normNearReachEnd") ctx.normNearReachEnd = std::clamp(std::stod(val), 0.10, 0.80);
-                else if (key == "normSuckStart") ctx.normSuckStart = std::clamp(std::stod(val), 0.05, 0.60);
-                else if (key == "normSuckPower") ctx.normSuckPower = std::clamp(std::stod(val), 0.8, 2.5);
-                else if (key == "normTipHalfW") ctx.normTipHalfW = std::clamp(std::stod(val), 0.002, 0.06);
-                else if (key == "minNeckHalfPx") ctx.minNeckHalfPx = std::clamp(std::stod(val), 0.5, 15.0);
-                else if (key == "tuckStart") ctx.tuckStart = std::clamp(std::stod(val), 0.30, 0.98);
-                else if (key == "iconAnchor") ctx.iconAnchor = std::clamp(std::stod(val), 0.10, 1.10);
-                else if (key == "tailFadeSpan") ctx.tailFadeSpan = std::clamp(std::stod(val), 0.0, 0.35);
-            } else if (section == "Mesh") {
-                if (key == "gridStepPx") ctx.host.grid_step_px = std::stod(val);
-                else if (key == "minGridSteps") ctx.host.min_grid_steps = std::stoi(val);
-                else if (key == "maxGridSteps") ctx.host.max_grid_steps = std::stoi(val);
-                else if (key == "crossStepsMin") ctx.host.cross_steps_min = std::stoi(val);
-                else if (key == "crossStepsMax") ctx.host.cross_steps_max = std::stoi(val);
-            }
-        } catch (...) {
+        double d = 0.0;
+        int n = 0;
+        if (section == "Basic") {
+            if (key == "refDurationMs" && parseDouble(val, d)) ctx.refDurationMs = std::clamp(d, 50.0, 3000.0);
+            else if (key == "unminimizeSpeedScale" && parseDouble(val, d)) ctx.unminimizeSpeedScale = std::clamp(d, 0.2, 3.0);
+            else if (key == "turnaroundMs" && parseDouble(val, d)) ctx.host.turnaround_ms = d;
+            else if (key == "ignoreGlobalSpeed") ctx.host.ignore_global_speed = (val == "true" || val == "1") ? 1 : 0;
+            else if (key == "sizeScaleExponent" && parseDouble(val, d)) ctx.sizeScaleExponent = std::clamp(d, 0.0, 1.0);
+            else if (key == "minDurationScale" && parseDouble(val, d)) ctx.minDurationScale = std::clamp(d, 0.4, 1.0);
+            else if (key == "maxDurationScale" && parseDouble(val, d)) ctx.maxDurationScale = std::clamp(d, 1.0, 2.5);
+            else if (key == "pourMode") ctx.pourMode = (val == "true" || val == "1");
+            else if (key == "pourMix" && parseDouble(val, d)) ctx.pourMix = std::clamp(d, 0.0, 1.0);
+        } else if (section == "QML_Standard") {
+            if (key == "refWinW" && parseDouble(val, d)) ctx.refWinW = std::clamp(d, 200.0, 3840.0);
+            else if (key == "refWinH" && parseDouble(val, d)) ctx.refWinH = std::clamp(d, 200.0, 2160.0);
+            else if (key == "normSquashEnd" && parseDouble(val, d)) ctx.normSquashEnd = std::clamp(d, 0.10, 0.80);
+            else if (key == "normNearReachEnd" && parseDouble(val, d)) ctx.normNearReachEnd = std::clamp(d, 0.10, 0.80);
+            else if (key == "normSuckStart" && parseDouble(val, d)) ctx.normSuckStart = std::clamp(d, 0.05, 0.60);
+            else if (key == "normSuckPower" && parseDouble(val, d)) ctx.normSuckPower = std::clamp(d, 0.8, 2.5);
+            else if (key == "normTipHalfW" && parseDouble(val, d)) ctx.normTipHalfW = std::clamp(d, 0.002, 0.06);
+            else if (key == "minNeckHalfPx" && parseDouble(val, d)) ctx.minNeckHalfPx = std::clamp(d, 0.5, 14.0);
+            else if (key == "tuckStart" && parseDouble(val, d)) ctx.tuckStart = std::clamp(d, 0.30, 0.98);
+            else if (key == "iconAnchor" && parseDouble(val, d)) ctx.iconAnchor = std::clamp(d, 0.10, 1.10);
+            else if (key == "tailFadeSpan" && parseDouble(val, d)) ctx.tailFadeSpan = std::clamp(d, 0.0, 0.35);
+        } else if (section == "Mesh") {
+            if (key == "gridStepPx" && parseDouble(val, d)) ctx.host.grid_step_px = d;
+            else if (key == "minGridSteps" && parseInt(val, n)) ctx.host.min_grid_steps = n;
+            else if (key == "maxGridSteps" && parseInt(val, n)) ctx.host.max_grid_steps = n;
+            else if (key == "crossStepsMin" && parseInt(val, n)) ctx.host.cross_steps_min = n;
+            else if (key == "crossStepsMax" && parseInt(val, n)) ctx.host.cross_steps_max = n;
         }
     }
 }
