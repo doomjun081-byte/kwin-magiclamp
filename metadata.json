@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Category": "Appearance",
+        "Description": "先收窄尾部再快速吸入任务栏的高密度纯实心神灯变形",
+        "EnabledByDefault": false,
+        "Icon": "preferences-system-windows-effect-magiclamp",
+        "Id": "kwin4_effect_smoothlamp",
+        "License": "GPL",
+        "Name": "最小化过渡动画 (自定义神灯)"
+    },
+    "X-KDE-Ordering": 60,
+    "X-KWin-Exclusive-Category": "minimize"
+}
